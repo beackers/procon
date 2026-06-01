@@ -5,9 +5,9 @@ Android IME designed to be used with Bluetooth Nintendo Switch controllers.
 ## Bootstrap
 
 This repository currently contains a minimal Android input method editor (IME)
-that can be installed and enabled as **Procon Keyboard**. The default keyboard
-view is a simple QWERTY layout that keeps text input usable while the
-controller-driven input layer is developed.
+that can be installed and enabled as **Procon Controller Overlay**. The input
+view is a compact Kotlin-based overlay above the navigation bar that shows which
+controller button is currently being pressed.
 
 ## Build
 
