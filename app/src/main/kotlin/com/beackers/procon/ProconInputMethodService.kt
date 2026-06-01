@@ -233,7 +233,6 @@ class ProconInputMethodService : InputMethodService() {
         }
         private val selectedTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
-            fakeBoldText = true
             textAlign = Paint.Align.CENTER
             textSize = dp(24).toFloat()
         }
