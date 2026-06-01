@@ -1,4 +1,4 @@
-package dev.procon.ime;
+package com.beackers.procon;
 
 import android.inputmethodservice.InputMethodService;
 import android.text.InputType;
