@@ -1,4 +1,6 @@
 <resources>
     <string name="app_name">Procon</string>
-    <string name="ime_name">Procon Keyboard</string>
+    <string name="ime_name">Procon Controller Overlay</string>
+    <string name="overlay_idle">Press a controller button</string>
+    <string name="overlay_pressed">Pressing: %1$s</string>
 </resources>
