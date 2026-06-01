@@ -25,13 +25,15 @@ import kotlin.math.sin
  * IME surface for controller-driven text input.
  *
  * The input view stays transparent and non-visual while the candidate view acts
- * as a lightweight radial selector. Holding a mapped controller button chooses
- * a letter group, tilting the left stick highlights a sector in that group, and
- * releasing the stick commits the highlighted lowercase letter.
+ * as a lightweight radial selector. Pressing a mapped controller button
+ * chooses a sticky character group, tilting the left stick highlights a sector
+ * in that group, and releasing the stick commits the highlighted character.
  */
 class ProconInputMethodService : InputMethodService() {
-    private val pressedLetterButtons = linkedSetOf<ControllerButton>()
-    private var activeButton: ControllerButton? = null
+    private var activeGroup: CharacterGroup? = null
+    private var shiftActive = false
+    private var leftTriggerPressed = false
+    private var rightTriggerPressed = false
     private var leftStickSelection: StickSelection? = null
     private var letterOverlay: LetterSectorOverlayView? = null
 
@@ -60,23 +62,61 @@ class ProconInputMethodService : InputMethodService() {
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-        val button = keyCode.toLetterButton() ?: return super.onKeyDown(keyCode, event)
-        if (pressedLetterButtons.add(button)) {
-            setActiveButton(button)
+        keyCode.toCharacterGroup()?.let { group ->
+            setActiveGroup(group)
+            return true
         }
-        return true
+
+        return when (keyCode) {
+            KeyEvent.KEYCODE_BUTTON_L1 -> {
+                deletePreviousCharacter()
+                true
+            }
+            KeyEvent.KEYCODE_BUTTON_R1 -> {
+                shiftActive = true
+                recalculateSelectionForActiveGroup()
+                updateOverlay()
+                true
+            }
+            KeyEvent.KEYCODE_BUTTON_L2 -> {
+                moveCursorLeft()
+                true
+            }
+            KeyEvent.KEYCODE_BUTTON_R2 -> {
+                moveCursorRight()
+                true
+            }
+            KeyEvent.KEYCODE_BUTTON_MODE, KeyEvent.KEYCODE_HOME -> {
+                sendEnterKey()
+                true
+            }
+            else -> super.onKeyDown(keyCode, event)
+        }
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
-        val button = keyCode.toLetterButton() ?: return super.onKeyUp(keyCode, event)
-        if (pressedLetterButtons.remove(button)) {
-            if (activeButton == button) {
-                setActiveButton(pressedLetterButtons.lastOrNull())
-            } else {
+        return when (keyCode) {
+            KeyEvent.KEYCODE_BUTTON_R1 -> {
+                shiftActive = false
+                recalculateSelectionForActiveGroup()
                 updateOverlay()
+                true
             }
+            KeyEvent.KEYCODE_BUTTON_L1,
+            KeyEvent.KEYCODE_BUTTON_L2,
+            KeyEvent.KEYCODE_BUTTON_R2,
+            KeyEvent.KEYCODE_BUTTON_MODE,
+            KeyEvent.KEYCODE_HOME,
+            KeyEvent.KEYCODE_BUTTON_A,
+            KeyEvent.KEYCODE_BUTTON_B,
+            KeyEvent.KEYCODE_BUTTON_X,
+            KeyEvent.KEYCODE_BUTTON_Y,
+            KeyEvent.KEYCODE_BUTTON_START,
+            KeyEvent.KEYCODE_BUTTON_SELECT,
+            KeyEvent.KEYCODE_PLUS,
+            KeyEvent.KEYCODE_MINUS -> true
+            else -> super.onKeyUp(keyCode, event)
         }
-        return true
     }
 
     override fun onGenericMotionEvent(event: MotionEvent): Boolean {
@@ -84,32 +124,35 @@ class ProconInputMethodService : InputMethodService() {
             return super.onGenericMotionEvent(event)
         }
 
+        updateTriggerButtons(event)
         updateLeftStickSelection(event)
         return true
     }
 
     private fun clearInputState() {
-        pressedLetterButtons.clear()
-        activeButton = null
+        activeGroup = null
+        shiftActive = false
+        leftTriggerPressed = false
+        rightTriggerPressed = false
         leftStickSelection = null
         updateOverlay()
     }
 
-    private fun setActiveButton(button: ControllerButton?) {
-        activeButton = button
-        recalculateSelectionForActiveButton()
+    private fun setActiveGroup(group: CharacterGroup) {
+        activeGroup = group
+        recalculateSelectionForActiveGroup()
         updateOverlay()
     }
 
-    private fun recalculateSelectionForActiveButton() {
-        val letters = activeButton?.letters
+    private fun recalculateSelectionForActiveGroup() {
+        val characters = activeGroup?.characters(shiftActive)
         val selection = leftStickSelection
-        if (letters.isNullOrEmpty() || selection == null) {
+        if (characters.isNullOrEmpty() || selection == null) {
             return
         }
 
         leftStickSelection = selection.copy(
-            letterIndex = letterIndexForAngle(selection.angleDegrees, letters.size),
+            characterIndex = characterIndexForAngle(selection.angleDegrees, characters.size),
         )
     }
 
@@ -126,35 +169,74 @@ class ProconInputMethodService : InputMethodService() {
             return
         }
 
-        val letters = activeButton?.letters
-        leftStickSelection = if (letters.isNullOrEmpty()) {
+        val characters = activeGroup?.characters(shiftActive)
+        leftStickSelection = if (characters.isNullOrEmpty()) {
             null
         } else {
             val angleDegrees = stickAngleDegrees(x, y)
             StickSelection(
                 angleDegrees = angleDegrees,
                 magnitude = magnitude,
-                letterIndex = letterIndexForAngle(angleDegrees, letters.size),
+                characterIndex = characterIndexForAngle(angleDegrees, characters.size),
             )
         }
         updateOverlay()
     }
 
     private fun commitCurrentSelection() {
-        val button = activeButton ?: return
+        val group = activeGroup ?: return
         val selection = leftStickSelection ?: return
-        val letter = button.letters.getOrNull(selection.letterIndex) ?: return
-        currentInputConnection?.commitText(letter.toString(), 1)
+        val character = group.characters(shiftActive).getOrNull(selection.characterIndex) ?: return
+        currentInputConnection?.commitText(character.toString(), 1)
     }
 
     private fun updateOverlay() {
-        val letters = activeButton?.letters.orEmpty()
-        val shouldShow = leftStickSelection != null && letters.isNotEmpty()
+        val characters = activeGroup?.characters(shiftActive).orEmpty()
+        val shouldShow = leftStickSelection != null && characters.isNotEmpty()
         setCandidatesViewShown(shouldShow)
         letterOverlay?.updateState(
-            letters = letters,
+            characters = characters,
             selection = leftStickSelection,
         )
+    }
+
+    private fun deletePreviousCharacter() {
+        currentInputConnection?.deleteSurroundingText(1, 0)
+    }
+
+    private fun moveCursorLeft() {
+        sendNavigationKey(KeyEvent.KEYCODE_DPAD_LEFT)
+    }
+
+    private fun moveCursorRight() {
+        sendNavigationKey(KeyEvent.KEYCODE_DPAD_RIGHT)
+    }
+
+    private fun sendEnterKey() {
+        sendNavigationKey(KeyEvent.KEYCODE_ENTER)
+    }
+
+    private fun sendNavigationKey(keyCode: Int) {
+        currentInputConnection?.apply {
+            sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+            sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+        }
+    }
+
+    private fun updateTriggerButtons(event: MotionEvent) {
+        val leftPressed = event.axisPressed(MotionEvent.AXIS_LTRIGGER) ||
+            event.axisPressed(MotionEvent.AXIS_BRAKE)
+        if (leftPressed && !leftTriggerPressed) {
+            moveCursorLeft()
+        }
+        leftTriggerPressed = leftPressed
+
+        val rightPressed = event.axisPressed(MotionEvent.AXIS_RTRIGGER) ||
+            event.axisPressed(MotionEvent.AXIS_GAS)
+        if (rightPressed && !rightTriggerPressed) {
+            moveCursorRight()
+        }
+        rightTriggerPressed = rightPressed
     }
 
     private fun MotionEvent.isJoystickEvent(): Boolean {
@@ -173,30 +255,46 @@ class ProconInputMethodService : InputMethodService() {
         return ((angle + FULL_CIRCLE_DEGREES) % FULL_CIRCLE_DEGREES).toFloat()
     }
 
-    private fun letterIndexForAngle(angleDegrees: Float, letterCount: Int): Int {
-        val sectorSize = FULL_CIRCLE_DEGREES / letterCount
-        return ((angleDegrees + sectorSize / 2) / sectorSize).toInt() % letterCount
+    private fun characterIndexForAngle(angleDegrees: Float, characterCount: Int): Int {
+        val sectorSize = FULL_CIRCLE_DEGREES / characterCount
+        return ((angleDegrees + sectorSize / 2) / sectorSize).toInt() % characterCount
     }
 
-    private fun Int.toLetterButton(): ControllerButton? = when (this) {
-        KeyEvent.KEYCODE_BUTTON_A -> ControllerButton.A
-        KeyEvent.KEYCODE_BUTTON_B -> ControllerButton.B
-        KeyEvent.KEYCODE_BUTTON_X -> ControllerButton.X
-        KeyEvent.KEYCODE_BUTTON_Y -> ControllerButton.Y
+    private fun MotionEvent.axisPressed(axis: Int): Boolean {
+        return getAxisValue(axis) > TRIGGER_PRESSED_THRESHOLD
+    }
+
+    private fun Int.toCharacterGroup(): CharacterGroup? = when (this) {
+        KeyEvent.KEYCODE_BUTTON_A -> CharacterGroup.A
+        KeyEvent.KEYCODE_BUTTON_B -> CharacterGroup.B
+        KeyEvent.KEYCODE_BUTTON_X -> CharacterGroup.X
+        KeyEvent.KEYCODE_BUTTON_Y -> CharacterGroup.Y
+        KeyEvent.KEYCODE_BUTTON_START, KeyEvent.KEYCODE_PLUS -> CharacterGroup.PUNCTUATION
+        KeyEvent.KEYCODE_BUTTON_SELECT, KeyEvent.KEYCODE_MINUS -> CharacterGroup.NUMBERS
         else -> null
     }
 
-    private enum class ControllerButton(val letters: List<Char>) {
-        A(('a'..'f').toList()),
-        B(('g'..'m').toList()),
-        X(('n'..'s').toList()),
-        Y(('t'..'z').toList()),
+    private enum class CharacterGroup(private val baseCharacters: List<Char>, private val supportsShift: Boolean = false) {
+        A(('a'..'f').toList(), true),
+        B(('g'..'m').toList(), true),
+        X(('n'..'s').toList(), true),
+        Y(('t'..'z').toList(), true),
+        PUNCTUATION(listOf('.', ',', '?', '!', '\'', '"', ':', ';', '/', '@', '#', '&')),
+        NUMBERS(('0'..'9').toList());
+
+        fun characters(shiftActive: Boolean): List<Char> {
+            return if (supportsShift && shiftActive) {
+                baseCharacters.map(Char::uppercaseChar)
+            } else {
+                baseCharacters
+            }
+        }
     }
 
     private data class StickSelection(
         val angleDegrees: Float,
         val magnitude: Float,
-        val letterIndex: Int,
+        val characterIndex: Int,
     )
 
     private class SpaceView(context: Context) : View(context) {
@@ -239,7 +337,7 @@ class ProconInputMethodService : InputMethodService() {
         private val textBounds = Rect()
         private val arrowHeadPath = Path()
 
-        private var letters: List<Char> = emptyList()
+        private var characters: List<Char> = emptyList()
         private var selection: StickSelection? = null
 
         init {
@@ -247,10 +345,10 @@ class ProconInputMethodService : InputMethodService() {
             setBackgroundColor(Color.TRANSPARENT)
         }
 
-        fun updateState(letters: List<Char>, selection: StickSelection?) {
-            this.letters = letters
+        fun updateState(characters: List<Char>, selection: StickSelection?) {
+            this.characters = characters
             this.selection = selection
-            visibility = if (selection != null && letters.isNotEmpty()) View.VISIBLE else View.GONE
+            visibility = if (selection != null && characters.isNotEmpty()) View.VISIBLE else View.GONE
             invalidate()
         }
 
@@ -264,18 +362,18 @@ class ProconInputMethodService : InputMethodService() {
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
             val currentSelection = selection ?: return
-            if (letters.isEmpty()) return
+            if (characters.isEmpty()) return
 
             val centerX = width / 2f
             val centerY = height / 2f
             val radius = min(width, height).toFloat() / 2f - dp(12)
-            val sectorAngle = 360f / letters.size
-            val selectedIndex = currentSelection.letterIndex.coerceIn(0, letters.lastIndex)
+            val sectorAngle = 360f / characters.size
+            val selectedIndex = currentSelection.characterIndex.coerceIn(0, characters.lastIndex)
 
             canvas.drawCircle(centerX, centerY, radius, backgroundPaint)
             drawSelectedSector(canvas, centerX, centerY, radius, selectedIndex, sectorAngle)
             drawDividers(canvas, centerX, centerY, radius, sectorAngle)
-            drawLetters(canvas, centerX, centerY, radius, selectedIndex, sectorAngle)
+            drawCharacters(canvas, centerX, centerY, radius, selectedIndex, sectorAngle)
             drawArrow(canvas, centerX, centerY, radius, currentSelection)
         }
 
@@ -307,7 +405,7 @@ class ProconInputMethodService : InputMethodService() {
             radius: Float,
             sectorAngle: Float,
         ) {
-            letters.indices.forEach { index ->
+            characters.indices.forEach { index ->
                 val boundaryAngle = index * sectorAngle - sectorAngle / 2f
                 val radians = boundaryAngle.toRadians()
                 canvas.drawLine(
@@ -321,7 +419,7 @@ class ProconInputMethodService : InputMethodService() {
             canvas.drawCircle(centerX, centerY, radius, dividerPaint)
         }
 
-        private fun drawLetters(
+        private fun drawCharacters(
             canvas: Canvas,
             centerX: Float,
             centerY: Float,
@@ -329,10 +427,10 @@ class ProconInputMethodService : InputMethodService() {
             selectedIndex: Int,
             sectorAngle: Float,
         ) {
-            letters.forEachIndexed { index, letter ->
+            characters.forEachIndexed { index, character ->
                 val radians = (index * sectorAngle).toRadians()
                 val paint = if (index == selectedIndex) selectedTextPaint else textPaint
-                val label = letter.toString()
+                val label = character.toString()
                 paint.getTextBounds(label, 0, label.length, textBounds)
                 val labelRadius = radius * 0.72f
                 val x = centerX + cos(radians).toFloat() * labelRadius
@@ -378,6 +476,7 @@ class ProconInputMethodService : InputMethodService() {
 
     private companion object {
         const val JOYSTICK_IDLE_THRESHOLD = 0.05f
+        const val TRIGGER_PRESSED_THRESHOLD = 0.5f
         const val FULL_CIRCLE_DEGREES = 360f
     }
 }
