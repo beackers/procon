@@ -30,7 +30,33 @@ jobs:
           gradle-version: 8.14.4
 
       - name: Build debug APK
-        run: gradle --no-daemon :app:assembleDebug
+        run: |
+          set +e
+          gradle --no-daemon :app:assembleDebug 2>&1 | tee gradle-build.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            reason=$(awk '
+              /\* What went wrong:/ { capture = 1; next }
+              capture && /^> / { sub(/^> /, ""); print; exit }
+              capture && NF { print; exit }
+            ' gradle-build.log)
+            if [ -z "$reason" ]; then
+              reason=$(awk '
+                /FAILURE:/ { print; exit }
+                /Exception|Error|error/ { print; exit }
+              ' gradle-build.log)
+            fi
+            if [ -z "$reason" ]; then
+              reason="Gradle build failed; see the build log for details."
+            fi
+            echo "::error title=Debug APK build failed::$reason"
+            {
+              echo "### Debug APK build failed"
+              echo
+              echo "$reason"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit "$status"
+          fi
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
