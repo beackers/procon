@@ -1,8 +1,4 @@
 <resources>
     <string name="app_name">Procon</string>
     <string name="ime_name">Procon Controller Overlay</string>
-    <string name="overlay_idle">Press a controller button or move a stick</string>
-    <string name="overlay_pressed">Pressing: %1$s</string>
-    <string name="overlay_joystick_state">%1$s: %2$s (%3$s)</string>
-    <string name="overlay_gyro_state">Gyro: x=%1$.2f, y=%2$.2f, z=%3$.2f rad/s</string>
 </resources>
