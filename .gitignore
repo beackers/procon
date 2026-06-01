@@ -1,3 +1,7 @@
+# Symlinks
+/java
+/asmr
+
 # Gradle files
 .gradle/
 build/

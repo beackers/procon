@@ -3,11 +3,11 @@ plugins {
 }
 
 android {
-    namespace 'dev.procon.ime'
+    namespace 'com.beackers.procon'
     compileSdk 36
 
     defaultConfig {
-        applicationId 'dev.procon.ime'
+        applicationId 'com.beackers.procon'
         minSdk 23
         targetSdk 36
         versionCode 1
