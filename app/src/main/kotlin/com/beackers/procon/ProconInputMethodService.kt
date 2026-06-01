@@ -1,213 +1,160 @@
 package com.beackers.procon
 
-import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
-import android.hardware.SensorManager
+import android.content.Context
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.Rect
 import android.inputmethodservice.InputMethodService
-import android.os.Build
-import android.view.Gravity
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
-import android.widget.LinearLayout
-import android.widget.TextView
+import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2
+import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.sin
 
 /**
  * IME surface for controller-driven text input.
  *
- * The input view intentionally stays small so it behaves like an overlay above
- * the system navigation bar while hardware controller events are routed through
- * the selected input method. The overlay reports the current button state and
- * leaves actual text-entry mapping to the controller input layer.
+ * The input view stays transparent and non-visual while the candidate view acts
+ * as a lightweight radial selector. Holding a mapped controller button chooses
+ * a letter group, tilting the left stick highlights a sector in that group, and
+ * releasing the stick commits the highlighted lowercase letter.
  */
-class ProconInputMethodService : InputMethodService(), SensorEventListener {
-    private val pressedButtons = linkedSetOf<String>()
-    private val joystickStates = linkedMapOf<Joystick, JoystickState>()
-    private var gyroState: GyroState? = null
-    private var registeredGyroManager: SensorManager? = null
-    private var registeredGyroDeviceId: Int? = null
-    private var statusText: TextView? = null
+class ProconInputMethodService : InputMethodService() {
+    private val pressedLetterButtons = linkedSetOf<ControllerButton>()
+    private var activeButton: ControllerButton? = null
+    private var leftStickSelection: StickSelection? = null
+    private var letterOverlay: LetterSectorOverlayView? = null
 
     override fun onCreateInputView(): View {
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            setPadding(dp(16), dp(12), dp(16), dp(12))
-            setBackgroundColor(getColor(R.color.overlay_background))
+        return SpaceView(this).apply {
+            setBackgroundColor(Color.TRANSPARENT)
+            minimumHeight = 0
+        }
+    }
 
-            addView(
-                TextView(context).also { label ->
-                    statusText = label
-                    label.gravity = Gravity.CENTER
-                    label.setTextColor(getColor(R.color.overlay_text))
-                    label.textSize = 20f
-                    label.text = getString(R.string.overlay_idle)
-                },
-                LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                ),
-            )
+    override fun onCreateCandidatesView(): View {
+        return LetterSectorOverlayView(this).also { overlay ->
+            letterOverlay = overlay
+            overlay.visibility = View.GONE
         }
     }
 
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
         super.onStartInput(attribute, restarting)
-        pressedButtons.clear()
-        joystickStates.clear()
-        gyroState = null
-        updateOverlay()
+        clearInputState()
     }
 
     override fun onFinishInput() {
-        pressedButtons.clear()
-        joystickStates.clear()
-        gyroState = null
-        updateOverlay()
+        clearInputState()
         super.onFinishInput()
     }
 
-    override fun onDestroy() {
-        unregisterGyroscope()
-        super.onDestroy()
-    }
-
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-        event?.device?.let(::registerGyroscopeIfAvailable)
-
-        val buttonLabel = keyCode.toControllerButtonLabel()
-        if (buttonLabel != null) {
-            pressedButtons.add(buttonLabel)
-            updateOverlay()
-            return true
+        val button = keyCode.toLetterButton() ?: return super.onKeyDown(keyCode, event)
+        if (pressedLetterButtons.add(button)) {
+            setActiveButton(button)
         }
-        return super.onKeyDown(keyCode, event)
+        return true
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
-        event?.device?.let(::registerGyroscopeIfAvailable)
-
-        val buttonLabel = keyCode.toControllerButtonLabel()
-        if (buttonLabel != null) {
-            pressedButtons.remove(buttonLabel)
-            updateOverlay()
-            return true
+        val button = keyCode.toLetterButton() ?: return super.onKeyUp(keyCode, event)
+        if (pressedLetterButtons.remove(button)) {
+            if (activeButton == button) {
+                setActiveButton(pressedLetterButtons.lastOrNull())
+            } else {
+                updateOverlay()
+            }
         }
-        return super.onKeyUp(keyCode, event)
+        return true
     }
 
     override fun onGenericMotionEvent(event: MotionEvent): Boolean {
-        if (event.isJoystickEvent()) {
-            event.device?.let(::registerGyroscopeIfAvailable)
-            updateJoystickState(event)
-            updateOverlay()
-            return true
+        if (!event.isJoystickEvent()) {
+            return super.onGenericMotionEvent(event)
         }
 
-        return super.onGenericMotionEvent(event)
+        updateLeftStickSelection(event)
+        return true
     }
 
-    override fun onSensorChanged(event: SensorEvent) {
-        if (event.sensor.type != Sensor.TYPE_GYROSCOPE || event.values.size < GYRO_AXIS_COUNT) {
-            return
-        }
-
-        gyroState = GyroState(
-            x = event.values[0],
-            y = event.values[1],
-            z = event.values[2],
-        )
+    private fun clearInputState() {
+        pressedLetterButtons.clear()
+        activeButton = null
+        leftStickSelection = null
         updateOverlay()
     }
 
-    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
-
-    private fun updateJoystickState(event: MotionEvent) {
-        val device = event.device ?: return
-        val leftX = event.centeredAxisValue(device, MotionEvent.AXIS_X)
-        val leftY = event.centeredAxisValue(device, MotionEvent.AXIS_Y)
-        val rightX = event.centeredAxisValue(device, MotionEvent.AXIS_Z)
-        val rightY = event.centeredAxisValue(device, MotionEvent.AXIS_RZ)
-
-        joystickStates.update(Joystick.LEFT, leftX, leftY)
-        joystickStates.update(Joystick.RIGHT, rightX, rightY)
+    private fun setActiveButton(button: ControllerButton?) {
+        activeButton = button
+        recalculateSelectionForActiveButton()
+        updateOverlay()
     }
 
-    private fun LinkedHashMap<Joystick, JoystickState>.update(joystick: Joystick, x: Float, y: Float) {
-        val magnitude = hypot(x, y).coerceAtMost(1f)
-        if (magnitude <= JOYSTICK_IDLE_THRESHOLD) {
-            remove(joystick)
+    private fun recalculateSelectionForActiveButton() {
+        val letters = activeButton?.letters
+        val selection = leftStickSelection
+        if (letters.isNullOrEmpty() || selection == null) {
             return
         }
 
-        put(
-            joystick,
-            JoystickState(
-                direction = joystickDirection(x, y),
-                magnitude = magnitude,
-            ),
+        leftStickSelection = selection.copy(
+            letterIndex = letterIndexForAngle(selection.angleDegrees, letters.size),
         )
     }
 
-    private fun registerGyroscopeIfAvailable(device: InputDevice) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || device.id == registeredGyroDeviceId) {
+    private fun updateLeftStickSelection(event: MotionEvent) {
+        val device = event.device ?: return
+        val x = event.centeredAxisValue(device, MotionEvent.AXIS_X)
+        val y = event.centeredAxisValue(device, MotionEvent.AXIS_Y)
+        val magnitude = hypot(x, y).coerceAtMost(1f)
+
+        if (magnitude <= JOYSTICK_IDLE_THRESHOLD) {
+            commitCurrentSelection()
+            leftStickSelection = null
+            updateOverlay()
             return
         }
 
-        unregisterGyroscope()
-
-        val sensorManager = device.sensorManager
-        val gyroscope = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE) ?: return
-        if (sensorManager.registerListener(this, gyroscope, SensorManager.SENSOR_DELAY_GAME)) {
-            registeredGyroManager = sensorManager
-            registeredGyroDeviceId = device.id
+        val letters = activeButton?.letters
+        leftStickSelection = if (letters.isNullOrEmpty()) {
+            null
+        } else {
+            val angleDegrees = stickAngleDegrees(x, y)
+            StickSelection(
+                angleDegrees = angleDegrees,
+                magnitude = magnitude,
+                letterIndex = letterIndexForAngle(angleDegrees, letters.size),
+            )
         }
+        updateOverlay()
     }
 
-    private fun unregisterGyroscope() {
-        registeredGyroManager?.unregisterListener(this)
-        registeredGyroManager = null
-        registeredGyroDeviceId = null
+    private fun commitCurrentSelection() {
+        val button = activeButton ?: return
+        val selection = leftStickSelection ?: return
+        val letter = button.letters.getOrNull(selection.letterIndex) ?: return
+        currentInputConnection?.commitText(letter.toString(), 1)
     }
 
     private fun updateOverlay() {
-        val lines = buildList {
-            if (pressedButtons.isNotEmpty()) {
-                add(getString(R.string.overlay_pressed, pressedButtons.joinToString(separator = " + ")))
-            }
-
-            joystickStates.forEach { (joystick, state) ->
-                add(
-                    getString(
-                        R.string.overlay_joystick_state,
-                        joystick.label,
-                        state.direction,
-                        state.magnitude.asPercent(),
-                    ),
-                )
-            }
-
-            gyroState?.let { state ->
-                add(
-                    getString(
-                        R.string.overlay_gyro_state,
-                        state.x,
-                        state.y,
-                        state.z,
-                    ),
-                )
-            }
-        }
-
-        statusText?.text = lines.takeIf { it.isNotEmpty() }?.joinToString(separator = "\n")
-            ?: getString(R.string.overlay_idle)
+        val letters = activeButton?.letters.orEmpty()
+        val shouldShow = leftStickSelection != null && letters.isNotEmpty()
+        setCandidatesViewShown(shouldShow)
+        letterOverlay?.updateState(
+            letters = letters,
+            selection = leftStickSelection,
+        )
     }
 
     private fun MotionEvent.isJoystickEvent(): Boolean {
@@ -221,72 +168,217 @@ class ProconInputMethodService : InputMethodService(), SensorEventListener {
         return if (abs(value) > flat) value else 0f
     }
 
-    private fun joystickDirection(x: Float, y: Float): String {
+    private fun stickAngleDegrees(x: Float, y: Float): Float {
         val angle = Math.toDegrees(atan2(-y.toDouble(), x.toDouble()))
-        val normalizedAngle = (angle + FULL_CIRCLE_DEGREES) % FULL_CIRCLE_DEGREES
-        val directionIndex = ((normalizedAngle + HALF_DIRECTION_SLICE_DEGREES) / DIRECTION_SLICE_DEGREES).toInt() %
-            JOYSTICK_DIRECTIONS.size
-        return JOYSTICK_DIRECTIONS[directionIndex]
+        return ((angle + FULL_CIRCLE_DEGREES) % FULL_CIRCLE_DEGREES).toFloat()
     }
 
-    private fun Float.asPercent(): String = "${(this * 100).toInt()}%"
+    private fun letterIndexForAngle(angleDegrees: Float, letterCount: Int): Int {
+        val sectorSize = FULL_CIRCLE_DEGREES / letterCount
+        return ((angleDegrees + sectorSize / 2) / sectorSize).toInt() % letterCount
+    }
 
-    private fun Int.toControllerButtonLabel(): String? = when (this) {
-        KeyEvent.KEYCODE_BUTTON_A -> "A"
-        KeyEvent.KEYCODE_BUTTON_B -> "B"
-        KeyEvent.KEYCODE_BUTTON_X -> "X"
-        KeyEvent.KEYCODE_BUTTON_Y -> "Y"
-        KeyEvent.KEYCODE_BUTTON_L1 -> "L"
-        KeyEvent.KEYCODE_BUTTON_R1 -> "R"
-        KeyEvent.KEYCODE_BUTTON_L2 -> "ZL"
-        KeyEvent.KEYCODE_BUTTON_R2 -> "ZR"
-        KeyEvent.KEYCODE_BUTTON_THUMBL -> "Left Stick"
-        KeyEvent.KEYCODE_BUTTON_THUMBR -> "Right Stick"
-        KeyEvent.KEYCODE_BUTTON_START -> "+"
-        KeyEvent.KEYCODE_BUTTON_SELECT -> "-"
-        KeyEvent.KEYCODE_BUTTON_MODE -> "Home"
-        KeyEvent.KEYCODE_DPAD_UP -> "D-Pad Up"
-        KeyEvent.KEYCODE_DPAD_DOWN -> "D-Pad Down"
-        KeyEvent.KEYCODE_DPAD_LEFT -> "D-Pad Left"
-        KeyEvent.KEYCODE_DPAD_RIGHT -> "D-Pad Right"
-        KeyEvent.KEYCODE_DPAD_CENTER -> "D-Pad Center"
+    private fun Int.toLetterButton(): ControllerButton? = when (this) {
+        KeyEvent.KEYCODE_BUTTON_A -> ControllerButton.A
+        KeyEvent.KEYCODE_BUTTON_B -> ControllerButton.B
+        KeyEvent.KEYCODE_BUTTON_X -> ControllerButton.X
+        KeyEvent.KEYCODE_BUTTON_Y -> ControllerButton.Y
         else -> null
     }
 
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
-
-    private enum class Joystick(val label: String) {
-        LEFT("Left stick"),
-        RIGHT("Right stick"),
+    private enum class ControllerButton(val letters: List<Char>) {
+        A(('a'..'f').toList()),
+        B(('g'..'m').toList()),
+        X(('n'..'s').toList()),
+        Y(('t'..'z').toList()),
     }
 
-    private data class JoystickState(
-        val direction: String,
+    private data class StickSelection(
+        val angleDegrees: Float,
         val magnitude: Float,
+        val letterIndex: Int,
     )
 
-    private data class GyroState(
-        val x: Float,
-        val y: Float,
-        val z: Float,
-    )
+    private class SpaceView(context: Context) : View(context) {
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            setMeasuredDimension(MeasureSpec.getSize(widthMeasureSpec), 0)
+        }
+    }
+
+    private class LetterSectorOverlayView(context: Context) : View(context) {
+        private val backgroundPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(178, 32, 33, 36)
+            style = Paint.Style.FILL
+        }
+        private val sectorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(84, 255, 255, 255)
+            style = Paint.Style.FILL
+        }
+        private val dividerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(130, 255, 255, 255)
+            strokeWidth = dp(1).toFloat()
+            style = Paint.Style.STROKE
+        }
+        private val arrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+            strokeWidth = dp(4).toFloat()
+            style = Paint.Style.STROKE
+        }
+        private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textAlign = Paint.Align.CENTER
+            textSize = dp(18).toFloat()
+        }
+        private val selectedTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            fakeBoldText = true
+            textAlign = Paint.Align.CENTER
+            textSize = dp(24).toFloat()
+        }
+        private val textBounds = Rect()
+        private val arrowHeadPath = Path()
+
+        private var letters: List<Char> = emptyList()
+        private var selection: StickSelection? = null
+
+        init {
+            setWillNotDraw(false)
+            setBackgroundColor(Color.TRANSPARENT)
+        }
+
+        fun updateState(letters: List<Char>, selection: StickSelection?) {
+            this.letters = letters
+            this.selection = selection
+            visibility = if (selection != null && letters.isNotEmpty()) View.VISIBLE else View.GONE
+            invalidate()
+        }
+
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            val desiredHeight = dp(188)
+            val width = MeasureSpec.getSize(widthMeasureSpec)
+            val height = resolveSize(desiredHeight, heightMeasureSpec)
+            setMeasuredDimension(width, height)
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val currentSelection = selection ?: return
+            if (letters.isEmpty()) return
+
+            val centerX = width / 2f
+            val centerY = height / 2f
+            val radius = min(width, height).toFloat() / 2f - dp(12)
+            val sectorAngle = 360f / letters.size
+            val selectedIndex = currentSelection.letterIndex.coerceIn(0, letters.lastIndex)
+
+            canvas.drawCircle(centerX, centerY, radius, backgroundPaint)
+            drawSelectedSector(canvas, centerX, centerY, radius, selectedIndex, sectorAngle)
+            drawDividers(canvas, centerX, centerY, radius, sectorAngle)
+            drawLetters(canvas, centerX, centerY, radius, selectedIndex, sectorAngle)
+            drawArrow(canvas, centerX, centerY, radius, currentSelection)
+        }
+
+        private fun drawSelectedSector(
+            canvas: Canvas,
+            centerX: Float,
+            centerY: Float,
+            radius: Float,
+            selectedIndex: Int,
+            sectorAngle: Float,
+        ) {
+            val startAngle = selectedIndex * sectorAngle - sectorAngle / 2f
+            canvas.drawArc(
+                centerX - radius,
+                centerY - radius,
+                centerX + radius,
+                centerY + radius,
+                -startAngle,
+                -sectorAngle,
+                true,
+                sectorPaint,
+            )
+        }
+
+        private fun drawDividers(
+            canvas: Canvas,
+            centerX: Float,
+            centerY: Float,
+            radius: Float,
+            sectorAngle: Float,
+        ) {
+            letters.indices.forEach { index ->
+                val boundaryAngle = index * sectorAngle - sectorAngle / 2f
+                val radians = boundaryAngle.toRadians()
+                canvas.drawLine(
+                    centerX,
+                    centerY,
+                    centerX + cos(radians).toFloat() * radius,
+                    centerY - sin(radians).toFloat() * radius,
+                    dividerPaint,
+                )
+            }
+            canvas.drawCircle(centerX, centerY, radius, dividerPaint)
+        }
+
+        private fun drawLetters(
+            canvas: Canvas,
+            centerX: Float,
+            centerY: Float,
+            radius: Float,
+            selectedIndex: Int,
+            sectorAngle: Float,
+        ) {
+            letters.forEachIndexed { index, letter ->
+                val radians = (index * sectorAngle).toRadians()
+                val paint = if (index == selectedIndex) selectedTextPaint else textPaint
+                val label = letter.toString()
+                paint.getTextBounds(label, 0, label.length, textBounds)
+                val labelRadius = radius * 0.72f
+                val x = centerX + cos(radians).toFloat() * labelRadius
+                val y = centerY - sin(radians).toFloat() * labelRadius - textBounds.exactCenterY()
+                canvas.drawText(label, x, y, paint)
+            }
+        }
+
+        private fun drawArrow(
+            canvas: Canvas,
+            centerX: Float,
+            centerY: Float,
+            radius: Float,
+            selection: StickSelection,
+        ) {
+            val radians = selection.angleDegrees.toRadians()
+            val length = radius * (0.25f + 0.45f * selection.magnitude.coerceIn(0f, 1f))
+            val endX = centerX + cos(radians).toFloat() * length
+            val endY = centerY - sin(radians).toFloat() * length
+            canvas.drawLine(centerX, centerY, endX, endY, arrowPaint)
+
+            val arrowHeadSize = dp(10).toFloat()
+            val left = (selection.angleDegrees + 150f).toRadians()
+            val right = (selection.angleDegrees - 150f).toRadians()
+            arrowHeadPath.reset()
+            arrowHeadPath.moveTo(endX, endY)
+            arrowHeadPath.lineTo(
+                endX + cos(left).toFloat() * arrowHeadSize,
+                endY - sin(left).toFloat() * arrowHeadSize,
+            )
+            arrowHeadPath.moveTo(endX, endY)
+            arrowHeadPath.lineTo(
+                endX + cos(right).toFloat() * arrowHeadSize,
+                endY - sin(right).toFloat() * arrowHeadSize,
+            )
+            canvas.drawPath(arrowHeadPath, arrowPaint)
+        }
+
+        private fun Float.toRadians(): Double = this * PI / 180.0
+
+        private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+    }
 
     private companion object {
-        const val GYRO_AXIS_COUNT = 3
         const val JOYSTICK_IDLE_THRESHOLD = 0.05f
-        const val FULL_CIRCLE_DEGREES = 360.0
-        const val DIRECTION_SLICE_DEGREES = 45.0
-        const val HALF_DIRECTION_SLICE_DEGREES = DIRECTION_SLICE_DEGREES / 2
-
-        val JOYSTICK_DIRECTIONS = listOf(
-            "Right",
-            "Up-right",
-            "Up",
-            "Up-left",
-            "Left",
-            "Down-left",
-            "Down",
-            "Down-right",
-        )
+        const val FULL_CIRCLE_DEGREES = 360f
     }
 }
