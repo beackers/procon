@@ -1,0 +1,6 @@
+<resources>
+    <color name="keyboard_background">#202124</color>
+    <color name="keyboard_key_background">#3C4043</color>
+    <color name="keyboard_key_text">#FFFFFF</color>
+    <color name="keyboard_hint_text">#BDC1C6</color>
+</resources>
